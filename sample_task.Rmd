@@ -1,0 +1,287 @@
+---
+title: "Data Task"
+author: "Peichen Li"
+output:
+  pdf_document:
+    number_sections: no
+    keep_tex: yes
+    latex_engine: pdflatex
+  html_document:
+    df_print: paged
+header-includes:
+- \usepackage{lscape}
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage[normalem]{ulem}
+- \usepackage{bbm}
+- \usepackage{float}
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  autodep = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  fig.pos = "H",
+  message = FALSE,
+  warning = FALSE,
+  out.extra = ''
+)
+
+options(scipen = 1, digits = 4)
+require(tidyverse)
+require(lubridate)
+require(magrittr)
+require(stargazer)
+set.seed(1)
+```
+# Data Task
+## Data Preparation
+First we take a look at the dataset we are interested in.  
+```{r Import the data}
+setwd("C:/Users/90596/Desktop")
+df = read_csv("test_data.txt")
+glimpse(df)
+```  
+
+Now we need to do some data cleaning
+```{r Data Cleaning and Summary, fig.align='center', fig.height=6, fig.width=9, results='asis'}
+num_visits = nrow(df %>% distinct(visit_num))
+num_visits
+phys_num <- length(unique(df$phys_name))
+phys_num
+# Data cleaning for patient arrival and discharge time
+df = df %>%
+  mutate( pat_arr = dmy_hms(ed_tc), pat_dis = dmy_hms(dcord_tc) ) %>%
+  mutate( pat_duration = as.numeric(difftime(pat_dis, pat_arr, 
+                                             units = "hours")) )
+# replace each occurrence of "noon" with an  string "12 p.m."
+df$shiftid = gsub("noon", "12 p.m.", df$shiftid)
+df$shiftid = gsub("p.m.", "pm", df$shiftid)
+df$shiftid = gsub("a.m.", "am", df$shiftid)
+# Create a histogram for expected log length of patient stay
+df %>%
+  ggplot(aes(x=xb_lntdc)) +
+  geom_histogram(bins=25) +
+  xlab("Measure of expected log length of stay") + 
+  theme_bw() 
+# Data cleaning for shiftid
+df1 = df %>%
+  mutate( shift_start = dmy_h( str_c(str_extract(shiftid, 
+                                    pattern = "[0-9]+[a-z]+[0-9]+ "), 
+                                    str_extract(df$shiftid, 
+                                    pattern = " [0-9]+ [ap]m ")) ))  %>%
+  mutate( shift_end0 = dmy_h( str_c(str_extract(shiftid, 
+                                    pattern = "[0-9]+[a-z]+[0-9]+ "), 
+                                    str_sub(df$shiftid, - 7, - 1) ) )) %>%
+  mutate( shift_end = as_datetime(ifelse( shift_start < shift_end0, 
+                                    shift_end0, shift_end0 + days(1) ) )) %>%
+  mutate( shift_duration = as.numeric(difftime(shift_end, shift_start, 
+                                    units = "hours") ) ) %>%
+  select( visit_num, shiftid, phys_name, pat_arr, pat_dis, 
+          xb_lntdc, pat_duration, shift_start, shift_end, shift_duration)
+# Summarize the data
+stargazer(as.data.frame(df1 %>% select(pat_duration, shift_duration, xb_lntdc)),
+          omit.summary.stat = c("p25", "p75"),
+          header = FALSE,
+          title = 'Summary Statistics for the data',
+          digits = 2)
+```
+## Question 0
+
+From the summary statistics, we can see that there are 43 different physicians and 8831 patient visits (observations), during three months (May, June, July) in 1982. From the distribution of expected log length of stay, we can see that there are two main data centers. The center with more frequency and higher value in log length of stay might refer to patients with major illnesses, and the other with less frequency and lower value may refer to patients with minor illnesses. There is more probability mass in major illnesses. The mean log length of stay is 1.12 and the mean time of shift of physicians is 9.10 hours, and the mean patient duration is 4.04 hoours.
+
+Also from the summary table, we can see that there are some negative values of patient duration, which should be logically incorrect.
+
+```{r Question0}
+sum(df1$pat_duration < 0)
+
+df1 %>% arrange(pat_duration) %>% head(5)
+```  
+
+After analysis, the results suggest that there are 3 data entry errors concerning with patient arrival and discharge time, which each is located at visit number 8505, 7911 or 3270, respectively.  
+
+## Question 1
+```{r Question 1}
+df = df1 %>%
+  mutate( ArrEarDummy = ifelse(pat_arr < shift_start, 100, 0) ) %>%
+  mutate( StayLateDummy = ifelse(pat_dis > shift_end, 100, 0) )
+# Some patients may arrive before their physician’s shift starts 
+# and therefore would have to wait  
+ArrEarPercentage = mean(df$ArrEarDummy)
+# Other patients may be discharged after their physician’s shift ends
+StayLatePercentage = mean(df$StayLateDummy)
+```
+
+Percentage of patients arrive before the shift starts: `r ArrEarPercentage`  
+Percentage of patients discharge after the end of the shift: `r StayLatePercentage`
+
+
+## Question 2
+```{r Question2, fig.align='center', fig.height=6, fig.width=9}
+df = df %>% mutate( pat_arr_hour = hour(pat_arr) ) %>%
+  group_by(pat_arr_hour) %>%
+  mutate( PatSevHr = mean(pat_arr_hour) ) %>%
+  slice(1)
+
+g1 <- ggplot(data = df) +
+  geom_line( aes(x = PatSevHr, y = xb_lntdc) ) + 
+  ylim(0,2) +
+  labs( x ="Patient Arrival by Hour", y="Avarage Patient Severity", title=
+          "Average Patient Severity over Arrival Hour")
+
+g1
+
+```  
+From the graph, we can see that there are some kinds of fluctuation of patient severity by hour. In particular, patients who arrive around 1pm and 6pm at ED seem to be the least severe. And patients who arrive around 3 am and 12 pm seem to be the most severe ones.
+
+To test whether patient severity is or is not predicted by hour of the day, I would first create 23 variables for the first 23 hour intervals in each day. And then regress patient severity on these dummy variables. After obtaining the estimated coefficients, I would test the overall significance of the model to reach our conclusion (use F test).
+
+## Question 3
+```{r Question3, fig.align='center', fig.height=6, fig.width=9}
+
+df <-df1 %>%
+  mutate(diff_time = as.numeric(difftime(pat_dis,shift_end,units="hours"))) %>%     
+# compare patient discharge time with shift times 
+  filter(diff_time < 4) %>%              
+# the extension of stay should not be greater than 4
+  mutate(index = floor(diff_time)) %>%
+  select(shiftid, phys_name, index)
+# Output the "census" data set as census.txt
+write_csv(df, file = "census.txt",col_names = TRUE)
+  
+df <- df %>%
+  mutate(num = 1) %>%
+  group_by(index) %>%
+  mutate(discharged = sum(num)) %>%
+  slice(1) %>%
+  select(index, discharged) %>%
+  ungroup()
+
+df
+
+df$census <- c(8199,8199-2, 8199-2-15, 8199-2-15-153, 8199-2-15
+               -153-394, 8199-2-15-153-394-629, 8199-2-15-153-394-629
+               -822, 8199-2-15-153-394-629-822-988, 8199-2-15-153-394
+               -629-822-988-1110, 8199-2-15-153-394
+               -629-822-988-1110-1105, 8199-2-15-153-394
+               -629-822-988-1110-1105-1051,8199-2-15-153-394
+               -629-822-988-1110-1105-876, 291+178+110, 110+178, 110)
+df
+
+g2 <- ggplot(df, aes(x=index) ) +
+  geom_line(aes(y=census, color = "black")) +
+  geom_line(aes(y=discharged, color = "blue")) +
+  geom_point(aes(y=census)) +
+  geom_point(aes(y=discharged)) +
+  geom_text(aes(y=census, label=census),hjust=0, vjust=0, na.rm=TRUE) +
+  geom_text(aes(y=discharged, label=discharged),hjust=0, vjust=0, na.rm=TRUE) +
+  scale_x_continuous(limits = c(-11, 3), breaks = seq(-11, 3, by = 1)) + 
+  theme_bw() +
+  ggtitle("The Census over Time") + 
+  scale_color_discrete(name = "Line", labels = c("census", "discharged per hour"))
+
+g2
+
+```
+The graph shows that with time relative to end of shift, the number of patients 
+generally tend to decrease and down to around zero eventually. However, note 
+that from the hour index -1 to 0, the amount of patients under care seems to 
+increase a bit. This abnormality suggests that the number of patients arriving 
+at that hour is great than the number of patients discharged at the same time.
+
+The idea of constructing the "census": First I create a new column indicating 
+the difference between patient discharge time and shift ending time. Then I 
+filter out observations with difference time greater than four hours. Then we 
+take the integer part of the difference time as the hour index. Grouping the 
+index, we can get the number of discharged patients per hour. By calculating 
+the remaining patient for each hour index, we can successfully get the census.
+
+Since the hour index is a discrete variable, the conclusions we drew above are 
+only consistent in an hourly pattern. For example, there might be results 
+contradicting to the general trend during each hour, as it's possible to have 
+peaks between two hour indexes. 
+
+## Question 4
+```{r Question4, fig.align='center', fig.height=6, fig.width=9}
+
+df <- df1 %>%
+    group_by(phys_name) %>%
+    mutate(LogLenStay = mean(xb_lntdc)) %>%
+    slice(1) %>%
+    select(LogLenStay, phys_name) %>%
+    arrange(desc(LogLenStay))
+  
+  
+g3 <- ggplot(df, aes(x=phys_name, y=LogLenStay,color=phys_name, 
+                     label = phys_name)) + 
+    geom_point(na.rm=TRUE) + 
+    geom_text(aes(label = phys_name), hjust = 0.5,  vjust = -1, size = 2) + 
+    theme_bw() +
+    theme(legend.position="none") +
+    ylab("Log Length of Stay") + 
+    ylim(1,1.4) +
+    ggtitle("Log Length of Stay by physician") +
+    theme(legend.title=element_blank()) + 
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank())
+g3
+
+```  
+
+```{r Table 1, results = 'asis', cache=TRUE}
+
+model_1 <- df1 %>% lm(xb_lntdc~phys_name, data = .)
+
+stargazer(model_1,
+          title = 'Regression Results',
+          single.row = TRUE,
+          header = FALSE)
+
+```  
+
+```{r Question4_Extension, fig.align='center', fig.height=6, fig.width=9}
+df <- df1 %>%
+  group_by(phys_name) %>%
+  mutate(num = 1) %>%
+  mutate(pat_num_per_phys = sum(num)) %>%
+  slice(1) %>%
+  select(pat_num_per_phys,phys_name) %>%
+  arrange(desc(pat_num_per_phys))
+
+df %>%
+  ggplot(aes(x=phys_name, y=pat_num_per_phys,color=phys_name, 
+             label = phys_name)) + 
+  geom_point(na.rm=TRUE) + 
+  geom_text(aes(label = phys_name), hjust = 0.5,  vjust = -1, size = 2) + 
+  theme_bw() +
+  theme(legend.position="none") +
+  ylab("Number of patients per physician") + 
+  ggtitle("Number of patients by physician") +
+  theme(legend.title=element_blank()) + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```  
+From the graph and the regression table, we see that physician Teresa is the 
+fastest at discharging patients. For this regression model, I only control for
+*phys_name* variable and fail to include *index* variable. By Question_3, it
+may be possible that patient discharging speed may be correlated with the hour
+index of patient arrival.  
+Potential threats: 1) the *phys_name* variable may be too weak to explain the 
+discharging speed since the R squared is very close to zero. 2) Omitted variable
+bias: as discussed above, we fail to include the *index* variable, which leaves
+our estimated coefficients biased. 3) Invalid F-test and t-test since we did not
+test for heteroskedasticity. This point may also suggest that our estimates may
+not be robust.
+Regarding the number of patients per physician, we see that physician Victoria
+only has few observations. We may take observations with Victoria as outliers.  
+
+
+## References
+
+- RA Data Task from DChan Lab (2020), SIEPR.
